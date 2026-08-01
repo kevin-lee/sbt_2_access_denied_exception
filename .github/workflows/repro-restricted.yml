@@ -35,6 +35,12 @@ jobs:
       - uses: sbt/setup-sbt@v1
       - name: Pin sbt version
         run: Set-Content -Path project/build.properties -Value 'sbt.version=${{ matrix.sbt-version }}'
+      - name: Grant the user explicit write access to the workspace
+        # Checked-out files carry ACLs that grant write via the Administrators
+        # group, which the restricted token disables; the mutate command needs
+        # a direct user grant to append to Test.scala.
+        shell: pwsh
+        run: icacls "$env:GITHUB_WORKSPACE" /grant "${env:USERNAME}:(OI)(CI)F" /T /Q
       - name: Prepare restricted runner script
         shell: pwsh
         run: |
