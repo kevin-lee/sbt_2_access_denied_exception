@@ -49,7 +49,7 @@ jobs:
         run: |
           $commands = switch -Wildcard ('${{ matrix.variant }}') {
             'nochange'       { ';compile;test;test' }
-            'set-manifest*'  { ';compile;test;set Compile / packageBin / packageOptions += reproManifestOption;test' }
+            'set-manifest*'  { ';compile;test;addManifestOption;test' }
             'mutate*'        { ';compile;test;mutate;test' }
           }
           $sbtOpts = '-Xms3g -Xmx3g'
