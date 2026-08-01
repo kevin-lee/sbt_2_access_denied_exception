@@ -1,18 +1,22 @@
-name: "repro restricted (no symlink privilege)"
+name: "repro restricted sbt 2.0.3"
 
-# GitHub windows runners are elevated, so sbt's cache store can symlink
-# target/out jars to CAS blobs and the reported AccessDeniedException never
-# triggers. These jobs run sbt under a restricted token
-# (runas /trustlevel:0x20000), dropping SeCreateSymbolicLinkPrivilege the way
-# a normal non-admin user machine does, so sbt falls back to copying real
-# files into target/out.
+# Runs sbt under a restricted token (runas /trustlevel:0x20000) so symlink
+# creation fails like on a normal non-admin user machine and sbt's cache
+# store falls back to copying real files into target/out.
+#
+# All variants use a fixed 3g heap so a GC pause cannot collect the abandoned
+# test classloader and release its jar handles mid-run (that made earlier
+# mutate runs pass by luck).
 #
 # Variants:
-#   nochange     compile;test;test         - the reported sequence as-is
-#   mutate       compile;test;mutate;test  - forces a legitimate repackage
-#                while the previous test classloader may still pin the jar
-#   mutate-close same as mutate but with -Dsbt.classloader.close=true, which
-#                should pass if the unclosed test classloader is the pinner
+#   nochange           compile;test;test - the reported sequence as-is
+#   set-manifest       adds a packageOption between the test runs: forces an
+#                      organic re-package with no recompile while the previous
+#                      test classloader still pins the old jar
+#   set-manifest-close same but with -Dsbt.classloader.close=true; passes if
+#                      the unclosed test classloader is the pinner
+#   mutate             source change between test runs (recompile + repackage)
+#   mutate-close       mutate with -Dsbt.classloader.close=true
 on:
   push:
   workflow_dispatch:
@@ -23,9 +27,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        sbt-version: ["2.0.3", "2.0.4"]
-        variant: [nochange, mutate, mutate-close]
-    name: "sbt ${{ matrix.sbt-version }} / ${{ matrix.variant }}"
+        variant: [nochange, set-manifest, set-manifest-close, mutate, mutate-close]
+    name: "sbt 2.0.3 / ${{ matrix.variant }}"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -34,7 +37,7 @@ jobs:
           java-version: 21
       - uses: sbt/setup-sbt@v1
       - name: Pin sbt version
-        run: Set-Content -Path project/build.properties -Value 'sbt.version=${{ matrix.sbt-version }}'
+        run: Set-Content -Path project/build.properties -Value 'sbt.version=2.0.3'
       - name: Grant the user explicit write access to the workspace
         # Checked-out files carry ACLs that grant write via the Administrators
         # group, which the restricted token disables; the mutate command needs
@@ -44,8 +47,13 @@ jobs:
       - name: Prepare restricted runner script
         shell: pwsh
         run: |
-          $commands = if ('${{ matrix.variant }}' -eq 'nochange') { ';compile;test;test' } else { ';compile;test;mutate;test' }
-          $sbtOpts = if ('${{ matrix.variant }}' -eq 'mutate-close') { '-Dsbt.classloader.close=true' } else { '' }
+          $commands = switch -Wildcard ('${{ matrix.variant }}') {
+            'nochange'       { ';compile;test;test' }
+            'set-manifest*'  { ';compile;test;set Compile / packageBin / packageOptions += Pkg.JarManifest(new java.util.jar.Manifest);test' }
+            'mutate*'        { ';compile;test;mutate;test' }
+          }
+          $sbtOpts = '-Xms3g -Xmx3g'
+          if ('${{ matrix.variant }}' -like '*-close') { $sbtOpts += ' -Dsbt.classloader.close=true' }
           @"
           @echo off
           cd /d $env:GITHUB_WORKSPACE
@@ -71,5 +79,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: "log-${{ matrix.sbt-version }}-${{ matrix.variant }}"
+          name: "log-2.0.3-${{ matrix.variant }}"
           path: sbt-restricted.log
