@@ -1,0 +1,88 @@
+name: "diagnose sbt 2.0.4 (Windows)"
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  # Runs on the normal NTFS workspace with --debug. GitHub windows runners are
+  # elevated, so sbt's DiskActionCacheStore can create symlinks; this job shows
+  # whether the packaged jar in target/out is a symlink to the CAS blob and
+  # whether the second `test` re-ran packageBin (organic) or hit the cache.
+  debug-ntfs:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: sbt/setup-sbt@v1
+      - name: Pin sbt version to 2.0.4
+        run: Set-Content -Path project/build.properties -Value 'sbt.version=2.0.4'
+      - name: Run compile, test, test with --debug
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          sbt --batch --debug compile test test *> sbt-debug.log
+          exit $LASTEXITCODE
+      - name: Inspect jar link type and cache behavior
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "=== jar LinkType (empty means regular file, SymbolicLink means CAS symlink) ==="
+          Get-ChildItem -Recurse target\out -Filter *.jar | Format-List FullName, LinkType, Target
+          Write-Host "=== Packaging / cache lines from sbt-debug.log ==="
+          Select-String -Path sbt-debug.log -Pattern 'Packaging |cache hit|Ignoring cache retrieval|Skipping cache storage|AccessDenied|wrote ' |
+            ForEach-Object { $_.Line } | Select-Object -Last 100
+      - name: Upload debug log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbt-debug-log-ntfs
+          path: sbt-debug.log
+
+  # Runs the same commands from a FAT32 VHD, where Windows cannot create
+  # symlinks regardless of privileges. This forces the copy fallback that a
+  # normal (non-elevated, no Developer Mode) user machine takes, so the test
+  # classloader pins the real jar file. Failure of this job = bug reproduced.
+  repro-fat32:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: sbt/setup-sbt@v1
+      - name: Pin sbt version to 2.0.4
+        run: Set-Content -Path project/build.properties -Value 'sbt.version=2.0.4'
+      - name: Create FAT32 VHD and copy project to T:\proj
+        shell: pwsh
+        run: |
+          @"
+          create vdisk file="C:\repro.vhdx" maximum=2048 type=expandable
+          select vdisk file="C:\repro.vhdx"
+          attach vdisk
+          create partition primary
+          format fs=fat32 quick label=REPRO
+          assign letter=T
+          "@ | Set-Content dp.txt
+          diskpart /s dp.txt
+          New-Item -ItemType Directory T:\proj | Out-Null
+          Copy-Item -Recurse -Force "$env:GITHUB_WORKSPACE\*" T:\proj\
+      - name: Run compile, test, test on FAT32 volume
+        shell: pwsh
+        working-directory: T:\proj
+        run: |
+          sbt --batch --debug compile test test *> C:\sbt-debug-fat32.log
+          $code = $LASTEXITCODE
+          Write-Host "=== tail of log ==="
+          Get-Content C:\sbt-debug-fat32.log -Tail 120
+          exit $code
+      - name: Upload debug log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbt-debug-log-fat32
+          path: C:\sbt-debug-fat32.log
